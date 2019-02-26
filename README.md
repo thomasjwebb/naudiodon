@@ -1,3 +1,7 @@
+This is a fork of [naudiodon](https://github.com/thomasjwebb/naudiodon), a WIP attempt to make the api more of a standard realtime audio callback instead of the stream interface. WIP!! Not working right now!!
+
+IGNORE BELOW, APPLIES ONLY TO THE REPO I FORKED FROM. KEEPING FOR REFERENCE FOR NOW.
+
 # Naudiodon
 
 A [Node.js](http://nodejs.org/) [addon](http://nodejs.org/api/addons.html) that provides a wrapper around the [PortAudio](http://portaudio.com/) library, enabling an application to record and play audio with cross platform support. With this library, you can create [node.js streams](https://nodejs.org/dist/latest-v6.x/docs/api/stream.html) that can be piped to or from other streams, such as files and network connections. This library supports back-pressure.

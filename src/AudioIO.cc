@@ -16,7 +16,9 @@
 #include "AudioIO.h"
 #include "PaContext.h"
 #include "Chunks.h"
+#include <chrono>
 #include <map>
+#include <thread>
 
 namespace streampunk {
 
@@ -27,62 +29,6 @@ static class AllocFinalizer {
 public:
   void operator()(Napi::Env env, uint8_t* data) { sOutstandingAllocs.erase(data); }
 } sAllocFinalizer;
-
-class ReadWorker : public Napi::AsyncWorker {
-  public:
-    ReadWorker(std::shared_ptr<PaContext> paContext, uint32_t numBytes, const Napi::Function& callback)
-      : AsyncWorker(callback, "AudioRead"), mPaContext(paContext), mNumBytes(numBytes)
-    { }
-    ~ReadWorker() {}
-
-    void Execute() {
-      mChunk = mPaContext->pullInChunk(mNumBytes);
-    }
-
-    void OnOK() {
-      Napi::HandleScope scope(Env());
-
-      std::string errStr;
-      if (mPaContext->getErrStr(errStr))
-        Callback().Call({Napi::String::New(Env(), errStr), Napi::Buffer<uint8_t>::New(Env(),0)});
-      else if (mChunk) {
-        sOutstandingAllocs.emplace(mChunk->buf(), mChunk);
-        Napi::Object buf = Napi::Buffer<uint8_t>::New(Env(), mChunk->buf(), mChunk->numBytes(), sAllocFinalizer);
-        Callback().Call({Env().Null(), buf});
-      } else
-        Callback().Call({Env().Null(), Env().Null()});
-    }
-
-  private:
-    std::shared_ptr<PaContext> mPaContext;
-    uint32_t mNumBytes;
-    std::shared_ptr<Chunk> mChunk;
-};
-
-class WriteWorker : public Napi::AsyncWorker {
-  public:
-    WriteWorker(std::shared_ptr<PaContext> paContext, std::shared_ptr<Chunk> chunk, const Napi::Function& callback)
-      : AsyncWorker(callback, "AudioWrite"), mPaContext(paContext), mChunk(chunk)
-    { }
-    ~WriteWorker() {}
-
-    void Execute() {
-      mPaContext->pushOutChunk(mChunk);
-    }
-
-    void OnOK() {
-      Napi::HandleScope scope(Env());
-      std::string errStr;
-      if (mPaContext->getErrStr(errStr))
-        Callback().Call({Napi::String::New(Env(), errStr)});
-      else
-        Callback().Call({Env().Null()});
-    }
-
-  private:
-    std::shared_ptr<PaContext> mPaContext;
-    std::shared_ptr<Chunk> mChunk;
-};
 
 class QuitWorker : public Napi::AsyncWorker {
   public:
@@ -106,6 +52,51 @@ class QuitWorker : public Napi::AsyncWorker {
     const PaContext::eStopFlag mStopFlag;
 };
 
+class AudioCallbackWorker : public Napi::AsyncWorker {
+public:
+  AudioCallbackWorker(const Napi::Function& callback)
+    : AsyncWorker(callback, "AudioCallback")
+  { }
+  ~AudioCallbackWorker() {}
+
+  void Execute() {
+  }
+
+  void OnOK() {
+    Napi::HandleScope scope(Env());
+    Callback().Call({});
+  }
+
+private:
+};
+
+class ReadWorker : public Napi::AsyncWorker {
+  public:
+    ReadWorker(std::shared_ptr<PaContext> paContext, const Napi::Function& callback)
+      : AsyncWorker(callback, "AudioRead"), mPaContext(paContext), mInformation(nullptr)
+    { }
+    ~ReadWorker() {}
+
+    void Execute() {
+      mInformation = mPaContext->pullCallbackInfo();
+    }
+
+    void OnOK() {
+      Napi::HandleScope scope(Env());
+
+      if (mInformation) {
+        Callback().Call({Napi::Number::New(Env(), mInformation->blockSize)});
+      }
+      else {
+        Callback().Call({});
+      }
+    }
+
+  private:
+    std::shared_ptr<PaContext> mPaContext;
+    CallbackInformation *mInformation;
+};
+
 AudioIO::AudioIO(const Napi::CallbackInfo& info) 
   : Napi::ObjectWrap<AudioIO>(info) {
   Napi::Env env = info.Env();
@@ -116,6 +107,7 @@ AudioIO::AudioIO(const Napi::CallbackInfo& info)
   Napi::Object optionsObj = info[0].As<Napi::Object>();
   Napi::Object inOptions = Napi::Object();
   Napi::Object outOptions = Napi::Object();
+
   if (optionsObj.Has("inOptions"))
     inOptions = optionsObj.Get("inOptions").As<Napi::Object>();
   if (optionsObj.Has("outOptions"))
@@ -136,41 +128,29 @@ Napi::Value AudioIO::Start(const Napi::CallbackInfo& info) {
 
 Napi::Value AudioIO::Read(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  if (info.Length() != 2)
-    throw Napi::Error::New(env, "AudioIO Read expects 2 arguments");
-  if (!info[0].IsNumber())
-    throw Napi::TypeError::New(env, "AudioIO Read expects a valid advisory size as the first parameter");
-  if (!info[1].IsFunction())
-    throw Napi::TypeError::New(env, "AudioIO Read expects a valid callback as the second parameter");
+  if (info.Length() != 1)
+    throw Napi::Error::New(env, "AudioIO Read expects 1 argument");
+  if (!info[0].IsFunction())
+    throw Napi::TypeError::New(env, "AudioIO Read expects a valid callback as the first parameter");
 
-  if (!mPaContext->hasInput())
-    throw Napi::Error::New(env, "AudioIO Read - cannot read from a output-only stream");
+  Napi::Function callback = info[0].As<Napi::Function>();
 
-  uint32_t numBytes = info[0].As<Napi::Number>().Uint32Value();
-  Napi::Function callback = info[1].As<Napi::Function>();
-
-  ReadWorker *readWork = new ReadWorker(mPaContext, numBytes, callback);
+  ReadWorker *readWork = new ReadWorker(mPaContext, callback);
   readWork->Queue();
   return env.Undefined();
 }
 
 Napi::Value AudioIO::Write(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  if (info.Length() != 2)
-    throw Napi::Error::New(env, "AudioIO Write expects 2 arguments");
+  if (info.Length() != 1)
+    throw Napi::Error::New(env, "AudioIO Write expects 1 argument");
   if (!info[0].IsObject())
     throw Napi::TypeError::New(env, "AudioIO Write expects a valid chunk buffer as the first parameter");
-  if (!info[1].IsFunction())
-    throw Napi::TypeError::New(env, "AudioIO Write expects a valid callback as the second parameter");
-
-  if (!mPaContext->hasOutput())
-    throw Napi::Error::New(env, "AudioIO Write - cannot write to an input-only stream");
 
   Napi::Object chunkObj = info[0].As<Napi::Object>();
-  Napi::Function callback = info[1].As<Napi::Function>();
 
-  WriteWorker *writeWork = new WriteWorker(mPaContext, std::make_shared<Chunk>(chunkObj), callback);
-  writeWork->Queue();
+  // WriteWorker *writeWork = new WriteWorker(mPaContext, std::make_shared<Chunk>(chunkObj), callback);
+  // writeWork->Queue();
   return env.Undefined();
 }
 

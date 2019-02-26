@@ -72,7 +72,8 @@ public:
       mSampleRate(unpackNum(env, tags, "sampleRate", 44100)),
       mChannelCount(unpackNum(env, tags, "channelCount", 2)),
       mSampleFormat(unpackNum(env, tags, "sampleFormat", 8)),
-      mMaxQueue(unpackNum(env, tags, "maxQueue", 2))
+      mMaxQueue(unpackNum(env, tags, "maxQueue", 2)),
+      mFramesPerBuffer(unpackNum(env, tags, "framesPerBuffer", 256))
   {}
   ~AudioOptions() {}
 
@@ -81,6 +82,7 @@ public:
   uint32_t channelCount() const  { return mChannelCount; }
   uint32_t sampleFormat() const  { return mSampleFormat; }
   uint32_t maxQueue() const  { return mMaxQueue; }
+  uint32_t framesPerBuffer() const  { return mFramesPerBuffer; }
 
   std::string toString() const  { 
     std::stringstream ss;
@@ -92,7 +94,8 @@ public:
     ss << "sample rate " << mSampleRate << ", ";
     ss << "channels " << mChannelCount << ", ";
     ss << "bits per sample " << mSampleFormat << ", ";
-    ss << "max queue " << mMaxQueue;
+    ss << "max queue " << mMaxQueue << ", ";
+    ss << "frames per buffer " << mFramesPerBuffer;
     return ss.str();
   }
 
@@ -102,6 +105,7 @@ private:
   uint32_t mChannelCount;
   uint32_t mSampleFormat;
   uint32_t mMaxQueue;
+  uint32_t mFramesPerBuffer;
 };
 
 } // namespace streampunk

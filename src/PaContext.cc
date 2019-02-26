@@ -17,6 +17,7 @@
 #include "Params.h"
 #include "Chunks.h"
 #include <portaudio.h>
+#include <chrono>
 
 namespace streampunk {
 
@@ -24,18 +25,19 @@ int PaCallback(const void *input, void *output, unsigned long frameCount,
                const PaStreamCallbackTimeInfo *timeInfo, 
                PaStreamCallbackFlags statusFlags, void *userData) {
   PaContext *paContext = (PaContext *)userData;
-  paContext->checkStatus(statusFlags);
-  int inRetCode = paContext->hasInput() && paContext->readPaBuffer(input, frameCount) ? paContinue : paComplete;
-  int outRetCode = paContext->hasOutput() && paContext->fillPaBuffer(output, frameCount) ? paContinue : paComplete;
-  return ((inRetCode == paComplete) && (outRetCode == paComplete)) ? paComplete : paContinue;
+  // paContext->checkStatus(statusFlags);
+  // int inRetCode = paContext->hasInput() && paContext->readPaBuffer(input, frameCount) ? paContinue : paComplete;
+  // int outRetCode = paContext->hasOutput() && paContext->fillPaBuffer(output, frameCount) ? paContinue : paComplete;
+  // AudioCallbackWorker *handler = new AudioCallbackWorker(paContext->mCallback);
+  // handler->Queue();
+  paContext->pushCallbackInfo(frameCount);
+  return paContinue;
 }
 
 PaContext::PaContext(Napi::Env env, Napi::Object inOptions, Napi::Object outOptions)
   : mInOptions(inOptions.IsEmpty() ? std::shared_ptr<AudioOptions>() : std::make_shared<AudioOptions>(env, inOptions)), 
     mOutOptions(outOptions.IsEmpty() ? std::shared_ptr<AudioOptions>() : std::make_shared<AudioOptions>(env, outOptions)),
-    mInChunks(new Chunks(mInOptions ? mInOptions->maxQueue() : 0)),
-    mOutChunks(new Chunks(mOutOptions ? mOutOptions->maxQueue() : 0)),
-    mStream(nullptr) {
+    mStream(nullptr), writtenIsFresh(false) {
 
   PaError errCode = Pa_Initialize();
   if (errCode != paNoError) {
@@ -57,17 +59,19 @@ PaContext::PaContext(Napi::Env env, Napi::Object inOptions, Napi::Object outOpti
     printf("Output %s\n", mOutOptions->toString().c_str());
 
   double sampleRate;
+  uint32_t framesPerBuffer;
   PaStreamParameters inParams;
   memset(&inParams, 0, sizeof(PaStreamParameters));
   if (mInOptions)
-    setParams(env, /*isInput*/true, mInOptions, inParams, sampleRate);
+    setParams(env, /*isInput*/true, mInOptions, inParams, sampleRate, framesPerBuffer);
 
   PaStreamParameters outParams;
   memset(&outParams, 0, sizeof(PaStreamParameters));
   if (mOutOptions)
-    setParams(env, /*isInput*/false, mOutOptions, outParams, sampleRate);
-
-  uint32_t framesPerBuffer = paFramesPerBufferUnspecified;
+    setParams(env, /*isInput*/false, mOutOptions, outParams, sampleRate, framesPerBuffer);
+  
+  mReadCallbackInfo.reset(new CallbackInformation);
+  mWriteCallbackInfo.reset(new CallbackInformation);
 
   errCode = Pa_OpenStream(&mStream,
                           mInOptions ? &inParams : NULL,
@@ -103,106 +107,58 @@ void PaContext::stop(eStopFlag flag) {
   Pa_Terminate();
 }
 
-std::shared_ptr<Chunk> PaContext::pullInChunk(uint32_t numBytes) {
-  std::shared_ptr<Memory> result = Memory::makeNew(numBytes);
-  bool finished = false;
-  uint32_t bytesRead = fillBuffer(result->buf(), numBytes, mInChunks, finished);
-  if (bytesRead != numBytes) {
-    if (0 == bytesRead)
-      result = std::shared_ptr<Memory>();
-    else {
-      std::shared_ptr<Memory> trimResult = Memory::makeNew(bytesRead);
-      memcpy(trimResult->buf(), result->buf(), bytesRead);
-      result = trimResult;
-    }
-  }
+// void PaContext::checkStatus(uint32_t statusFlags) {
+//   if (statusFlags) {
+//     std::string err = std::string("portAudio status - ");
+//     if (statusFlags & paInputUnderflow)
+//       err += "input underflow ";
+//     if (statusFlags & paInputOverflow)
+//       err += "input overflow ";
+//     if (statusFlags & paOutputUnderflow)
+//       err += "output underflow ";
+//     if (statusFlags & paOutputOverflow)
+//       err += "output overflow ";
+//     if (statusFlags & paPrimingOutput)
+//       err += "priming output ";
 
-  return std::make_shared<Chunk>(result);
-}
+//     std::lock_guard<std::mutex> lk(m);
+//     mErrStr = err;
+//   }
+// }
 
-void PaContext::pushOutChunk(std::shared_ptr<Chunk> chunk) {
-  mOutChunks->push(chunk);
-}
-
-void PaContext::checkStatus(uint32_t statusFlags) {
-  if (statusFlags) {
-    std::string err = std::string("portAudio status - ");
-    if (statusFlags & paInputUnderflow)
-      err += "input underflow ";
-    if (statusFlags & paInputOverflow)
-      err += "input overflow ";
-    if (statusFlags & paOutputUnderflow)
-      err += "output underflow ";
-    if (statusFlags & paOutputOverflow)
-      err += "output overflow ";
-    if (statusFlags & paPrimingOutput)
-      err += "priming output ";
-
-    std::lock_guard<std::mutex> lk(m);
-    mErrStr = err;
-  }
-}
-
-bool PaContext::getErrStr(std::string& errStr) {
-  std::lock_guard<std::mutex> lk(m);
-  errStr = mErrStr;
-  mErrStr.clear();
-  return !errStr.empty();
-}
+// bool PaContext::getErrStr(std::string& errStr) {
+//   std::lock_guard<std::mutex> lk(m);
+//   errStr = mErrStr;
+//   mErrStr.clear();
+//   return !errStr.empty();
+// }
 
 void PaContext::quit() {
-  if (mInOptions)
-    mInChunks->quit();
-  if (mOutOptions)
-    mOutChunks->quit();
 }
 
-bool PaContext::readPaBuffer(const void *srcBuf, uint32_t frameCount) {
-  uint32_t bytesAvailable = frameCount * mInOptions->channelCount() * mInOptions->sampleFormat() / 8;
-  std::shared_ptr<Memory> chunk = Memory::makeNew(bytesAvailable);
-  memcpy(chunk->buf(), srcBuf, bytesAvailable);
-  mInChunks->push(std::make_shared<Chunk>(chunk));
-  return true;
+void PaContext::pushCallbackInfo(int blockSize) {
+  {
+    std::unique_lock<std::mutex> lk(m);
+    mWriteCallbackInfo->blockSize = blockSize;
+    writtenIsFresh = true;
+  }
+  cv.notify_one();
 }
 
-bool PaContext::fillPaBuffer(void *dstBuf, uint32_t frameCount) {
-  uint32_t bytesRemaining = frameCount * mOutOptions->channelCount() * mOutOptions->sampleFormat() / 8;
-  bool finished = false;
-  fillBuffer((uint8_t *)dstBuf, bytesRemaining, mOutChunks, finished);
-  return !finished;
+CallbackInformation *PaContext::pullCallbackInfo() {
+  std::unique_lock<std::mutex> lk(m);
+  if (cv.wait_for(lk, std::chrono::microseconds(500), [this]{return writtenIsFresh == true;})) {
+    writtenIsFresh = false;
+    mWriteCallbackInfo.swap(mReadCallbackInfo);
+    return mReadCallbackInfo.get();
+  }
+  return nullptr;  
 }
 
 // private
-uint32_t PaContext::fillBuffer(uint8_t *buf, uint32_t numBytes,
-                               std::shared_ptr<Chunks> chunks,
-                               bool &finished) {
-  uint32_t bufOff = 0;
-  while (numBytes) {
-    if (!chunks->curBuf() || (chunks->curBuf() && (chunks->curBytes() == chunks->curOffset()))) {
-      chunks->waitNext();
-      if (!chunks->curBuf()) {
-        printf("Finishing - %d bytes not available to fill the last buffer\n", numBytes);
-        memset(buf + bufOff, 0, numBytes);
-        finished = true;
-        break;
-      }
-    }
-
-    uint32_t curBytes = std::min<uint32_t>(numBytes, chunks->curBytes() - chunks->curOffset());
-    void *srcBuf = chunks->curBuf() + chunks->curOffset();
-    memcpy(buf + bufOff, srcBuf, curBytes);
-
-    bufOff += curBytes;
-    chunks->incOffset(curBytes);
-    numBytes -= curBytes;
-  }
-
-  return bufOff;
-}
-
 void PaContext::setParams(Napi::Env env, bool isInput, 
                           std::shared_ptr<AudioOptions> options, 
-                          PaStreamParameters &params, double &sampleRate) {
+                          PaStreamParameters &params, double &sampleRate, uint32_t &framesPerBuffer) {
   int32_t deviceID = (int32_t)options->deviceID();
   if ((deviceID >= 0) && (deviceID < Pa_GetDeviceCount()))
     params.device = (PaDeviceIndex)deviceID;
@@ -232,6 +188,7 @@ void PaContext::setParams(Napi::Env env, bool isInput,
   params.hostApiSpecificStreamInfo = NULL;
 
   sampleRate = (double)options->sampleRate();
+  framesPerBuffer = options->framesPerBuffer();
 
   #ifdef __arm__
   framesPerBuffer = 256;

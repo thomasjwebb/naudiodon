@@ -19,27 +19,37 @@ var sampleRate = 44100;
 
 // console.log(portAudio.getDevices());
 
-var ai = new portAudio.AudioIO({
+function callback(info, callback) {
+  console.log('called!');
+  console.log(info);
+  callback(1);
+}
+
+// try {
+var aio = new portAudio.AudioIO({
   inOptions: {
     channelCount: 2,
     sampleFormat: portAudio.SampleFormat16Bit,
     sampleRate: sampleRate,
-    deviceId: 1
-  }
-});
-
-var ao = new portAudio.AudioIO({
+    deviceId: 0
+  },
   outOptions: {
     channelCount: 2,
     sampleFormat: portAudio.SampleFormat16Bit,
     sampleRate: sampleRate,
-    deviceId: -1
-  }
-});
+    deviceId: 0
+  },
+}, callback);
 
-ai.pipe(ao);
+aio.start();
 
-ai.once('data', () => ao.start());
-ai.start();
+process.on('SIGINT', aio.quit);
 
-process.on('SIGINT', ai.quit);
+// // I feel like all this below shouldn't be necessary
+// // ctrl+d to quit
+process.stdin.resume();
+
+// }
+// catch(err) {
+//   console.log(err);
+// }

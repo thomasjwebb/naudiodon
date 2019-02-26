@@ -19,6 +19,7 @@
 #include <napi.h>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 
 struct PaStreamParameters;
 
@@ -27,6 +28,10 @@ namespace streampunk {
 class AudioOptions;
 class Chunk;
 class Chunks;
+
+struct CallbackInformation {
+  int blockSize;
+};
 
 class PaContext {
 public:
@@ -41,33 +46,24 @@ public:
   void start(Napi::Env env);
   void stop(eStopFlag flag);
 
-  std::shared_ptr<Chunk> pullInChunk(uint32_t numBytes);
-  void pushOutChunk(std::shared_ptr<Chunk> chunk);
-
-  void checkStatus(uint32_t statusFlags);
-  bool getErrStr(std::string& errStr);
-
   void quit();
 
-  bool readPaBuffer(const void *srcBuf, uint32_t frameCount);
-  bool fillPaBuffer(void *dstBuf, uint32_t frameCount);
+  void pushCallbackInfo(int blockSize); // change this to take a lambda so the updating is still happening under mutex lock
+  CallbackInformation *pullCallbackInfo();
 
 private:
   std::shared_ptr<AudioOptions> mInOptions;
   std::shared_ptr<AudioOptions> mOutOptions;
-  std::shared_ptr<Chunks> mInChunks;
-  std::shared_ptr<Chunks> mOutChunks;
   void *mStream;
-  std::string mErrStr;
   std::mutex m;
-
-  uint32_t fillBuffer(uint8_t *buf, uint32_t numBytes,
-                      std::shared_ptr<Chunks> chunks,
-                      bool &finished);
+  std::condition_variable cv;
+  std::unique_ptr<CallbackInformation> mReadCallbackInfo;
+  std::unique_ptr<CallbackInformation> mWriteCallbackInfo;
+  bool writtenIsFresh;
 
   void setParams(Napi::Env env, bool isInput, 
                  std::shared_ptr<AudioOptions> options, 
-                 PaStreamParameters &params, double &sampleRate);
+                 PaStreamParameters &params, double &sampleRate, uint32_t &framesPerBuffer);
 };
 
 } // namespace streampunk
